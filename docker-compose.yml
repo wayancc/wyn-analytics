@@ -1,0 +1,20 @@
+services:
+  wyn-analytics:
+    build: .
+    ports:
+      - "8080:80"
+    volumes:
+      - wyn-analytics-data:/var/www/wyn-analytics/storage
+    restart: unless-stopped
+
+  # Rolls up finished days and applies retention every 10 minutes.
+  worker:
+    build: .
+    command: ["php", "bin/wyn-analytics", "work"]
+    user: www-data
+    volumes:
+      - wyn-analytics-data:/var/www/wyn-analytics/storage
+    restart: unless-stopped
+
+volumes:
+  wyn-analytics-data:

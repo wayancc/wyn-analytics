@@ -1,0 +1,16 @@
+# Rolls up finished days and applies retention every 10 minutes.
+#   sudo cp deploy/wyn-analytics.service /etc/systemd/system/
+#   sudo systemctl enable --now wyn-analytics
+[Unit]
+Description=Wyn Analytics worker
+After=network.target
+
+[Service]
+User=www-data
+WorkingDirectory=/var/www/wyn-analytics
+ExecStart=/usr/bin/php bin/wyn-analytics work
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

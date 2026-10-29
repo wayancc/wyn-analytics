@@ -1,0 +1,19 @@
+# Only used when the domain's document root points at this folder instead of public/
+# (some shared hosts don't let you change it for the main domain). Pointing the
+# document root at public/ is better; then this file is never read.
+
+Options -Indexes
+
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    # Never serve the database, the code or the docs.
+    RewriteRule ^(storage|src|templates|tests|bin|deploy|\.git)(/|$) - [F,L]
+    RewriteRule ^(config(\.example)?\.php|composer\.json|[^/]+\.md|LICENSE.*|Dockerfile|docker-compose\.yml)$ - [F,L]
+    # Everything else is served from public/.
+    RewriteCond %{REQUEST_URI} !^/public/
+    RewriteRule ^(.*)$ public/$1 [L]
+</IfModule>
+
+<IfModule !mod_rewrite.c>
+    Require all denied
+</IfModule>

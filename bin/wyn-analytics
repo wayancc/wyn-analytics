@@ -1,0 +1,183 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require dirname(__DIR__) . '/src/bootstrap.php';
+
+use WynAnalytics\App;
+use WynAnalytics\Geo;
+use WynAnalytics\Period;
+use WynAnalytics\Stats;
+
+$args = array_slice($argv, 1);
+$command = array_shift($args) ?? 'help';
+$opts = [];
+foreach ($args as $arg) {
+    if (preg_match('/^--([a-z-]+)(?:=(.*))?$/', $arg, $m)) {
+        $opts[$m[1]] = $m[2] ?? true;
+    }
+}
+$green = fn (string $s) => "\033[32m{$s}\033[0m";
+$red = fn (string $s) => "\033[31m{$s}\033[0m";
+$dim = fn (string $s) => "\033[2m{$s}\033[0m";
+
+try {
+    $app = App::boot(WYN_ROOT);
+
+    switch ($command) {
+        case 'run':
+            // Rollups for days that have ended, then retention. Run hourly from cron.
+            $r = $app->rollup->run($app->now());
+            echo "Rolled up {$r['rolled']} days, removed {$r['pruned_visits']} visits and {$r['pruned_events']} events past retention\n";
+            break;
+
+        case 'work':
+            // Long-running worker for Docker / systemd: runs the job every few minutes, no cron needed.
+            $every = max(60, (int) ($opts['every'] ?? 600));
+            echo $green('Wyn Analytics worker started') . " (every {$every}s, Ctrl+C to stop)\n";
+            $stop = false;
+            if (function_exists('pcntl_signal')) {
+                pcntl_async_signals(true);
+                pcntl_signal(SIGTERM, function () use (&$stop) { $stop = true; });
+                pcntl_signal(SIGINT, function () use (&$stop) { $stop = true; });
+            }
+            while (!$stop) {
+                try {
+                    $r = $app->rollup->run($app->now());
+                    if ($r['rolled'] || $r['pruned_visits']) {
+                        echo date('H:i:s') . " rolled up {$r['rolled']} days, removed {$r['pruned_visits']} old visits\n";
+                    }
+                } catch (Throwable $e) {
+                    // A busy database must not stop the worker. Try again next time.
+                    fwrite(STDERR, date('H:i:s') . ' ' . $red('run failed: ' . $e->getMessage()) . "\n");
+                }
+                for ($i = 0; $i < $every * 10 && !$stop; $i++) {
+                    usleep(100_000);
+                }
+            }
+            echo "Worker stopped\n";
+            break;
+
+        case 'prune':
+            $app->rollup->run($app->now()); // never prune days that aren't rolled up yet
+            $r = $app->rollup->prune($app->now());
+            echo "Removed {$r['pruned_visits']} visits and {$r['pruned_events']} events older than {$app->settings->retentionDays()} days\n";
+            if (isset($opts['vacuum'])) {
+                $app->db->pdo->exec('VACUUM');
+                echo "Database compacted\n";
+            }
+            break;
+
+        case 'geo:update':
+            $target = $app->config->geoPath();
+            if (isset($opts['file'])) {
+                $source = (string) $opts['file'];
+                $label = 'DB-IP Country Lite (' . basename($source) . ')';
+            } else {
+                $source = tempnam(sys_get_temp_dir(), 'wyn-geo');
+                $label = '';
+                foreach ([date('Y-m'), date('Y-m', strtotime('first day of last month'))] as $month) {
+                    $url = sprintf(Geo::SOURCE_URL, $month);
+                    echo "Downloading {$url}\n";
+                    $ctx = stream_context_create(['http' => ['timeout' => 60, 'user_agent' => 'WynAnalytics/' . WYN_VERSION]]);
+                    $in = @fopen($url, 'rb', false, $ctx);
+                    if ($in !== false) {
+                        file_put_contents($source . '.gz', $in);
+                        fclose($in);
+                        $source .= '.gz';
+                        $label = "DB-IP Country Lite {$month}";
+                        break;
+                    }
+                }
+                if ($label === '') {
+                    throw new RuntimeException("Couldn't download the country database. Download it yourself from https://db-ip.com/db/download/ip-to-country-lite (CSV) and run: php bin/wyn-analytics geo:update --file=dbip-country-lite.csv.gz");
+                }
+            }
+            $r = Geo::build($source, $target, $label);
+            echo $green('Country database ready') . ": {$r['v4']} IPv4 and {$r['v6']} IPv6 ranges in " . basename($target) . "\n";
+            echo $dim('IP geolocation by DB-IP (https://db-ip.com), CC BY 4.0.') . "\n";
+            break;
+
+        case 'site:add':
+            [$id, $errors] = $app->sites->save([
+                'domain' => $opts['domain'] ?? '', 'name' => $opts['name'] ?? '', 'timezone' => $opts['timezone'] ?? date_default_timezone_get(),
+                'respect_gpc' => 1, 'include_subdomains' => 1,
+            ]);
+            if ($errors !== []) {
+                throw new RuntimeException(implode(' ', $errors) . "\nUsage: bin/wyn-analytics site:add --domain=example.com [--name=…] [--timezone=Asia/Makassar]");
+            }
+            $site = $app->sites->find((int) $id);
+            echo $green("Added {$site['domain']}") . ". Paste this before </head> on every page:\n\n" . $app->snippet($site) . "\n";
+            break;
+
+        case 'sites':
+            foreach ($app->sites->all() as $s) {
+                $p = Period::make('7d', $s['timezone'], $app->now());
+                $t = $app->stats->totals($s, $p->from, $p->to);
+                printf("%-30s %-22s %7s visitors (7 days)  %s\n", mb_strimwidth($s['domain'], 0, 30, '…'), $s['timezone'], number_format($t['visitors']),
+                    $s['first_event_at'] ? '' : $dim('no visits yet'));
+            }
+            break;
+
+        case 'export':
+            $site = $app->sites->findByDomain((string) ($opts['site'] ?? '')) ?? throw new RuntimeException('Usage: bin/wyn-analytics export --site=example.com [--from=2026-01-01] [--to=2026-01-31]');
+            $tz = new DateTimeZone($site['timezone']);
+            $to = (string) ($opts['to'] ?? (new DateTimeImmutable('now', $tz))->format('Y-m-d'));
+            $from = (string) ($opts['from'] ?? (new DateTimeImmutable($to, $tz))->modify('-29 days')->format('Y-m-d'));
+            $period = Period::make('custom', $site['timezone'], $app->now(), $from, $to)->daily();
+            $app->rollup->catchUp($site, $app->now());
+            $out = fopen('php://stdout', 'w');
+            fputcsv($out, ['date', 'visitors', 'visits', 'pageviews', 'bounce_rate', 'avg_visit_duration'], escape: '');
+            foreach ($app->stats->series($site, $period) as $day => $m) {
+                fputcsv($out, [$day, $m['visitors'], $m['visits'], $m['pageviews'], $m['visits'] ? round($m['bounces'] / $m['visits'] * 100, 1) : '',
+                    $m['visits'] ? round($m['duration'] / $m['visits']) : ''], escape: '');
+            }
+            break;
+
+        case 'user:password':
+            $user = isset($opts['email']) ? $app->db->one('SELECT id FROM wyn_users WHERE email = ?', [strtolower((string) $opts['email'])]) : null;
+            if ($user === null) {
+                throw new RuntimeException('Usage: bin/wyn-analytics user:password --email=you@example.com (user must exist)');
+            }
+            echo 'New password: ';
+            system('stty -echo 2>/dev/null');
+            $password = trim((string) fgets(STDIN));
+            system('stty echo 2>/dev/null');
+            echo "\n";
+            if (strlen($password) < 10) {
+                throw new RuntimeException('Use at least 10 characters.');
+            }
+            $app->auth->changePassword((int) $user['id'], $password);
+            echo $green('Password changed') . "\n";
+            break;
+
+        case 'serve':
+            $port = (int) ($opts['port'] ?? 8000);
+            echo $green("Wyn Analytics: http://127.0.0.1:{$port}/admin") . "  (Ctrl+C to stop)\n";
+            passthru(sprintf('PHP_CLI_SERVER_WORKERS=4 %s -S 127.0.0.1:%d -t %s %s', escapeshellarg(PHP_BINARY), $port,
+                escapeshellarg(WYN_ROOT . '/public'), escapeshellarg(WYN_ROOT . '/public/index.php')));
+            break;
+
+        default:
+            echo <<<TXT
+            Wyn Analytics: privacy-first website analytics
+
+            Usage: php bin/wyn-analytics <command>
+
+              run                              Roll up finished days and apply retention (cron: hourly)
+              work [--every=600]               Keep running and do the above every few minutes (Docker, systemd)
+              prune [--vacuum]                 Delete raw data past retention now; --vacuum also shrinks the file
+              geo:update [--file=…csv.gz]      Download (or load) the free DB-IP country database
+              site:add --domain=… [--name=…] [--timezone=…]
+              sites                            List sites with visitors in the last 7 days
+              export --site=… [--from=…] [--to=…]   Daily stats as CSV on stdout
+              user:password --email=…          Reset a password
+              serve [--port=8000]              Local dev server
+
+            TXT;
+    }
+} catch (Throwable $e) {
+    fwrite(STDERR, $red($e->getMessage()) . "\n");
+    exit(1);
+}

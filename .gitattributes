@@ -1,0 +1,2 @@
+# Left out of release zips (git archive)
+/.github export-ignore

@@ -1,0 +1,44 @@
+name: wyn-analytics CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        php: ['8.2', '8.3', '8.4']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: pdo_sqlite, mbstring, intl, zlib
+          coverage: none
+      - name: Lint
+        run: find src templates public tests -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null && php -l bin/wyn-analytics
+      - name: Tests
+        run: php tests/run.php
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t wyn-analytics .
+
+  release-zip:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip
+        run: git archive --format=zip --prefix=wyn-analytics/ -o wyn-analytics-${GITHUB_REF_NAME}.zip HEAD
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: wyn-analytics-*.zip

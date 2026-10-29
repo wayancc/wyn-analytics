@@ -1,0 +1,22 @@
+{
+  "name": "wayancc/wyn-analytics",
+  "description": "Cookieless, privacy-first website analytics. PHP 8.2 + SQLite, no dependencies, runs on shared hosting.",
+  "type": "project",
+  "license": ["AGPL-3.0-only", "MIT"],
+  "keywords": ["analytics", "web-analytics", "privacy", "cookieless", "google-analytics-alternative", "plausible-alternative", "self-hosted", "sqlite", "php"],
+  "homepage": "https://github.com/wayancc/wyn-analytics",
+  "require": {
+    "php": ">=8.2",
+    "ext-pdo_sqlite": "*",
+    "ext-mbstring": "*"
+  },
+  "suggest": {
+    "ext-intl": "Shows full country names in the dashboard",
+    "ext-zlib": "Serves the tracking script gzipped and reads .csv.gz country files"
+  },
+  "bin": ["bin/wyn-analytics"],
+  "scripts": {
+    "test": "php tests/run.php",
+    "serve": "php bin/wyn-analytics serve"
+  }
+}
